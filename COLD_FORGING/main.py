@@ -1,7 +1,7 @@
 from read_plc import ModbusHelper
 from weight import read_weight
 import time
-from sending_data import send_trolley_weight, send_production_weight, send_machine_status
+from sending_data import send_weight, send_production_weight, send_machine_status, fetch_machine_status
 import os
 import sys
 import logging.config
@@ -14,7 +14,7 @@ from ingeniousLib import logMan
 import schedule
 
 
-log = logMan.ILogs('UPS_log', 'info', True, True)
+log = logMan.ILogs('UPS_log', 'debug', True, True)
 
 if getattr(sys, 'frozen', False):
     dirname = os.path.dirname(sys.executable)
@@ -151,6 +151,15 @@ SPIKE_THRESHOLD_KG = 1
 SPIKE_DURATION_THRESHOLD_SEC = 3
 FL_SPIKE_OCCURRED = False
 GL_WEIGHT_TO_SEND = 0
+
+# msg key dict here keys are stored as value and msg is dictionaryKeys
+# when msg is received send weight with its value as its key
+MSG_KEY_DICT = {
+    "Send Trolley Weight": "trolley_weight",
+    "SEND SCRAP PIECE": "process_scrap_weight",
+    "SEND END PIECE": "coil_end_piece_weight",
+    "SEND TRIMMING": "trimming_weight",
+}
 # endregion
 
 
@@ -215,40 +224,43 @@ def receive_message(queue_name=QUEUE, host=HOST, port=PORT, username=USERNAME_, 
 #         time.sleep(0.5)
 
 
-def sensor_data():
-    global timer_started, start_time, machine_status, AMQP_DATA, STOP_PRODUCTION, SEND_STATUS, SEND_FALSE
-    # Logic when machine is off meanse our sensor is not sensing parts then stop machine
-    while True:
-        try:
-            register_value = ob_mb.read_machine_status()  # Function to get the value from the register
-            log.info(f"[+] Machine Status is {register_value}")
-            # time.sleep(3)
-            # if not register_value[0]:
-            #     if not timer_started:
-            #         start_time = time.time()
-            #         timer_started = True
-            #     else:
-            #         if not start_time:
-            #             start_time = time.time()
-            #         elapsed_time = time.time() - start_time
-            #         if elapsed_time > 20:
-            #             machine_status = False
-            # else:
-            #     # Reset timer and status if value is True
-            #     timer_started = False
-            #     machine_status = True
-            #     STOP_PRODUCTION = False
-            # if not machine_status:
-            #     if not SEND_FALSE:
-            #         write_machine_off()
-            #         STOP_PRODUCTION = True
-            #         payload = {'machine_status': False}
-            #         SEND_STATUS = False
-            #         SEND_FALSE = True
-            #         send_machine_status(payload)
-        except Exception as e:
-            log.error(f"[-] Error while reading and sending sensor data {e}")
-        time.sleep(0.1)
+# def sensor_data():
+#     global timer_started, start_time, machine_status, AMQP_DATA, STOP_PRODUCTION, SEND_STATUS, SEND_FALSE
+#     # Logic when machine is off meanse our sensor is not sensing parts then stop machine
+#     while True:
+#         try:
+#             register_value = ob_mb.read_machine_status()  # Function to get the value from the register
+#             log.info(f"[+] Machine Status is {register_value}")
+#
+#         except Exception as e:
+#             log.error(f"[-] Error while reading and sending sensor data {e}")
+#         time.sleep(0.1)
+
+class MachineStatus:
+    def __init__(self):
+        self.prev_status = None
+        self.last_sent_time = time.time()
+
+
+    def read_and_send_mc_status(self):
+        global timer_started, start_time, machine_status, AMQP_DATA, STOP_PRODUCTION, SEND_STATUS, SEND_FALSE
+        while True:
+            try:
+                curr_machine_status = ob_mb.read_machine_status()  # Function to get the value from the register
+                log.info(f"[+] Machine Status is {curr_machine_status}")
+                if curr_machine_status is not None:
+                    if curr_machine_status != self.prev_status or (time.time() - self.last_sent_time) > 15:
+                        self.prev_status = curr_machine_status
+                        send_machine_status({'machine_status': curr_machine_status})
+                        fetch_machine_status(MACHINE_NAME, curr_machine_status)
+
+                else:
+                    log.error(f"Error Communicating with machine")
+
+            except Exception as e:
+                log.error(f"[-] Error while reading and sending sensor data {e}")
+            time.sleep(2)
+
 
 
 def check_spike(input_list: list[int|float], spike_threshold: int|float) -> bool:
@@ -270,24 +282,24 @@ def main():
     while True:
         # sensor_data()
         weight = read_weight()
-        log.info(f"[+] Trolly Weight is [{weight}]")
-        if AMQP_DATA == "Send Trolley Weight":
-            # trying to send the Trolley Weight
+        log.info(f"[+] Curr Weight is [{weight}]")
+        if AMQP_DATA in ["Send Trolley Weight", "SEND SCRAP PIECE", "SEND END PIECE", "SEND TRIMMING"]:
+            # in any msg arrive from the amqp sending its weight to the telemetry
             try:
                 weight = read_weight()
-                trolley_payload = {
-                    "trolley_weight": weight
+                weight_payload = {
+                    f"{MSG_KEY_DICT.get(AMQP_DATA, "unknown")}": weight
                 }
-                if send_trolley_weight(trolley_payload):
-                    log.info(f"[+] Trolley Weight Sent Succcessfully {trolley_payload}")
+                if send_weight(weight_payload):
+                    log.info(f"[+] {MSG_KEY_DICT.get(AMQP_DATA, "unknown")} weight Sent Succcessfully {weight_payload}")
                 else:
-                    log.error(f"[-] Failed to send the Trolly Weight : {weight}")
+                    log.error(f"[-] Failed to send {MSG_KEY_DICT.get(AMQP_DATA, "unknown")}  Weight : {weight}")
                 time.sleep(0.1)
             except Exception as e:
                 log.error(f'error in reading weight {e}')
                 time.sleep(1)
 
-        elif AMQP_DATA in ["TROLLEY CHANGED", "TROLLEY CANCELLED"]:
+        elif AMQP_DATA in ["TROLLEY CHANGED", "TROLLEY CANCELLED", "CONTINUE PRODUCTION"]:
             FL_PRODUCTION_START = True
             GL_LAST_PROD_SEND_TIME = time.time()
             GL_PREV_WEIGHT = None
@@ -345,12 +357,18 @@ def main():
             FL_PRODUCTION_PREV_STATUS = FL_PRODUCTION_START
         else:
             log.info(f"[-] SPIKE OCCURRED ")
+        time.sleep(.5)
 
 
 if __name__ == '__main__':
+    ob_mc_status = MachineStatus()
     log.info("Started....")
-    THREADS = [[threading.Thread(target=main), main], [threading.Thread(target=receive_message), receive_message],
-               [threading.Thread(target=sensor_data), sensor_data]]
+    THREADS = [
+        [threading.Thread(target=main), main],
+        [threading.Thread(target=receive_message), receive_message],
+        [threading.Thread(target=ob_mc_status.read_and_send_mc_status), ob_mc_status.read_and_send_mc_status]
+    ]
+
     while True:
         for thread in THREADS:
             if not thread[0].is_alive():

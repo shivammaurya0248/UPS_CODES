@@ -1,5 +1,4 @@
 import time
-import os
 from pyModbusTCP.client import ModbusClient
 import logging
 
@@ -22,8 +21,9 @@ class ModbusHelper:
         try:
             for _ in range(5):
                 c = self.connection()
-                regs = c.read_coils(8192, 1)
+                regs = c.read_coils(8194, 1)
                 log.info(f"[+] Got Machine data {regs}")
+                log.debug(f"[+] Output Stop Status {c.read_coils(8193, 1)}")
                 c.close()
                 if not regs:
                     log.warning(f"[+] Got Machine data {regs}")
@@ -40,8 +40,15 @@ class ModbusHelper:
             for i in range(5):
                 log.info("[+] Trying to Turn Machine [OFF]")
                 if c.write_single_coil(8193, True):
-                    log.info(f"[+] Machine Stopped Successfully")
-                    return True
+                    log.info(f"[+] Machine Stopped Successfully: wrote True to PLC Succesfully: Resetting Relay in 5 seconds")
+                    time.sleep(5)
+                    if c.write_single_coil(8193, False):
+                        log.info(f"[+] Relay Resetted successfully")
+                        return True
+                    else:
+                        log.error(f"[-] Realy Not resetted unable to write False to PLC")
+                else:
+                    log.error(f"[-] Failed to write False to PLC")
         except Exception as err:
             log.error(f'Error PLC disconnected {err}')
         log.info("[-] Failed to Turn OFF the Machine....")
