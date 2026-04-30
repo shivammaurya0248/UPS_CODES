@@ -52,7 +52,7 @@ log.info(usb_ports)
 PORT_WT = usb_ports[0]
 send_data = True
 ACCESS_TOKEN = '4hzxPf6jtgyvvLigEB3e'
-host_ip = '192.168.102.152'
+host_ip = 'localhost'
 HOST = f'http://{host_ip}:8080/api/v1/{ACCESS_TOKEN}/telemetry'
 HEADERS = {'content-type': 'application/json'}
 
@@ -144,7 +144,7 @@ def read_barcode():
         while True:
             try:
                 if ser.in_waiting > 0:
-                    barcode_data = ser.readline().decode('utf-8').strip()
+                    barcode_data = ser.readline().decode('ascii').strip()
                     return barcode_data
             except Exception as e:
                 log.error(f"Error: {e}")
